@@ -595,8 +595,7 @@ int do_level_calibration(int mavlink_fd) {
 	param_get(pitch_offset_handle, &pitch_offset_current);
 	param_get(board_rot_handle, &board_rot_current);
 
-	// give attitude some time to settle if there have been changes to the board rotation parameters
-	if (board_rot_current == 0 && fabsf(roll_offset_current) < FLT_EPSILON && fabsf(pitch_offset_current) < FLT_EPSILON ) {
+	if (board_rot_current == 0) {
 		settle_time = 0;
 	}
 

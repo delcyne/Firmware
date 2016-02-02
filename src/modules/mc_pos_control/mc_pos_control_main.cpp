@@ -180,6 +180,7 @@ private:
 		param_t xy_ff;
 		param_t tilt_max_air;
 		param_t land_speed;
+		param_t tko_jmpspd;
 		param_t tko_speed;
 		param_t tilt_max_land;
 		param_t man_roll_max;
@@ -198,6 +199,7 @@ private:
 		float thr_max;
 		float tilt_max_air;
 		float land_speed;
+		float tko_jmpspd;
 		float tko_speed;
 		float tilt_max_land;
 		float man_roll_max;
@@ -248,7 +250,6 @@ private:
 	bool _takeoff_jumped;
 	float _vel_z_lp;
 	float _acc_z_lp;
-	float _takeoff_thrust_sp;
 
 	/**
 	 * Update our local parameter cache.
@@ -377,8 +378,7 @@ MulticopterPositionControl::MulticopterPositionControl() :
 	_landing_started(0),
 	_takeoff_jumped(false),
 	_vel_z_lp(0),
-	_acc_z_lp(0),
-	_takeoff_thrust_sp(0.0f)
+	_acc_z_lp(0)
 {
 	memset(&_vehicle_status, 0, sizeof(_vehicle_status));
 	memset(&_ctrl_state, 0, sizeof(_ctrl_state));
@@ -429,6 +429,7 @@ MulticopterPositionControl::MulticopterPositionControl() :
 	_params_handles.xy_ff		= param_find("MPC_XY_FF");
 	_params_handles.tilt_max_air	= param_find("MPC_TILTMAX_AIR");
 	_params_handles.land_speed	= param_find("MPC_LAND_SPEED");
+	_params_handles.tko_jmpspd	= param_find("MPC_TKO_JMPSPD");
 	_params_handles.tko_speed	= param_find("MPC_TKO_SPEED");
 	_params_handles.tilt_max_land	= param_find("MPC_TILTMAX_LND");
 	_params_handles.man_roll_max = param_find("MPC_MAN_R_MAX");
@@ -492,6 +493,7 @@ MulticopterPositionControl::parameters_update(bool force)
 		param_get(_params_handles.tilt_max_air, &_params.tilt_max_air);
 		_params.tilt_max_air = math::radians(_params.tilt_max_air);
 		param_get(_params_handles.land_speed, &_params.land_speed);
+		param_get(_params_handles.tko_jmpspd, &_params.tko_jmpspd);
 		param_get(_params_handles.tko_speed, &_params.tko_speed);
 		param_get(_params_handles.tilt_max_land, &_params.tilt_max_land);
 		_params.tilt_max_land = math::radians(_params.tilt_max_land);
@@ -1357,29 +1359,24 @@ MulticopterPositionControl::task_main()
 				    && _pos_sp_triplet.current.type == position_setpoint_s::SETPOINT_TYPE_TAKEOFF) {
 
 					if (!_takeoff_jumped) {
-						// ramp thrust setpoint up
-						if (_vel(2) > -(_params.tko_speed / 2.0f)) {
-							_takeoff_thrust_sp += 0.5f * dt;
-							_vel_sp.zero();
-							_vel_prev.zero();
-						} else {
-							// copter has reached our takeoff speed. split the thrust setpoint up
-							// into an integral part and into a P part
-							thrust_int(2) = _takeoff_thrust_sp - _params.vel_p(2) * fabsf(_vel(2));
-							thrust_int(2) = -math::constrain(thrust_int(2), _params.thr_min, _params.thr_max);
-							_takeoff_jumped = true;
-							reset_int_z = false;
-						}
-					}
+						/* do a quick jump (ramp vel sp up in 1/2sec) until we shoot over takeoff speed */
+						float accel = _vel_sp_prev(2) - _params.tko_jmpspd;
+						float tmp = _vel_sp_prev(2) + accel * dt * 2.0f;
+						_vel_sp(2) = math::max(tmp, -_params.tko_jmpspd);
 
-					if (_takeoff_jumped) {
-						_vel_sp(2) = -_params.tko_speed;
-						_vel_sp_prev(2) = -_params.tko_speed;
+						if (_vel(2) < -_params.tko_speed) {
+							_takeoff_jumped = true;
+						}
+
+					} else {
+						/* slowly reduce forced takeoff speed to set climb rate (in 3 sec) */
+						float decel = _params.tko_jmpspd - _params.tko_speed;
+						float tmp = decel / 3.0f * dt + _vel_sp_prev(2);
+						_vel_sp(2) = math::min(tmp, -_params.tko_speed);
 					}
 
 				} else {
 					_takeoff_jumped = false;
-					_takeoff_thrust_sp = 0.0f;
 				}
 
 				// limit total horizontal acceleration
@@ -1394,14 +1391,6 @@ MulticopterPositionControl::task_main()
 					math::Vector<2> vel_sp_hor = acc_hor * dt + vel_sp_hor_prev;
 					_vel_sp(0) = vel_sp_hor(0);
 					_vel_sp(1) = vel_sp_hor(1);
-				}
-
-				// limit vertical acceleration
-				float acc_v = (_vel_sp(2) - _vel_sp_prev(2)) / dt;
-
-				if (fabsf(acc_v) > 2 * _params.acc_hor_max) {
-					acc_v /= fabsf(acc_v);
-					_vel_sp(2) = acc_v * 2 * _params.acc_hor_max * dt + _vel_sp_prev(2);
 				}
 
 				_vel_sp_prev = _vel_sp;
@@ -1460,13 +1449,6 @@ MulticopterPositionControl::task_main()
 					/* thrust vector in NED frame */
 					// TODO?: + _vel_sp.emult(_params.vel_ff)
 					math::Vector<3> thrust_sp = vel_err.emult(_params.vel_p) + _vel_err_d.emult(_params.vel_d) + thrust_int;
-
-					if (_pos_sp_triplet.current.type == position_setpoint_s::SETPOINT_TYPE_TAKEOFF
-							&& !_takeoff_jumped) {
-						// for jumped takeoffs use special thrust setpoint calculated above
-						thrust_sp.zero();
-						thrust_sp(2) = -_takeoff_thrust_sp;
-					}
 
 					if (!_control_mode.flag_control_velocity_enabled) {
 						thrust_sp(0) = 0.0f;
